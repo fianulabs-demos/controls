@@ -1,7 +1,7 @@
 # Basic Deployment Workflow
 #
 # This workflow demonstrates a simple deployment pattern for Fianu official controls.
-# Based on the existing apply_fianulabs_dev.yaml workflow.
+# Uses direct script calls instead of custom actions for portability.
 #
 # Triggers:
 #   - Push to main branch
@@ -10,13 +10,13 @@
 # What it does:
 #   1. Checks out code
 #   2. Sets up Fianu CLI
-#   3. Packages controls
-#   4. Deploys to Fianu environment
+#   3. Packages controls using ../../../scripts/package-all.sh
+#   4. Deploys using ../../../scripts/apply-all.sh
 #
 # Usage:
 #   - Copy to .github/workflows/deploy-dev.yml
 #   - Configure secrets: FIANU_DEV_CLIENT_ID, FIANU_DEV_CLIENT_SECRET
-#   - Update control-list with your controls
+#   - Update CONTROLS variable with your control paths
 
 name: Deploy Controls - Basic
 
@@ -26,16 +26,13 @@ on:
       - main
   workflow_dispatch:  # Allow manual trigger
 
+env:
+  # List of controls to deploy (space-separated)
+  CONTROLS: "ci.commit.codereview snyk.sast.vulnerabilities"
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
-    # Required permissions
-    permissions:
-      id-token: write
-      contents: write
-      packages: write
-      actions: write
 
     steps:
       # 1. Checkout code
@@ -49,31 +46,24 @@ jobs:
           version: ${{ secrets.FIANU_VERSION }}
 
       # 3. Package controls
-      # Update this list with your controls
       - name: Package controls
-        id: package
-        uses: ./.github/actions/package-controls
-        with:
-          control-list: '["ci.commit.codereview", "snyk.sast.vulnerabilities"]'
+        run: |
+          echo "Packaging controls: $CONTROLS"
+          ./scripts/package-all.sh $CONTROLS
 
       # 4. Deploy controls
       - name: Deploy controls
-        id: deploy
-        uses: ./.github/actions/apply-controls
-        with:
-          client-id: ${{ secrets.FIANU_DEV_CLIENT_ID }}
-          client-secret: ${{ secrets.FIANU_DEV_CLIENT_SECRET }}
-          host: https://fianu-dev.fianu.io
-          rate-limit-delay: 2  # Seconds between deployments
-          fail-on-error: true   # Fail workflow if any control fails
+        env:
+          FIANU_CLIENT_ID: ${{ secrets.FIANU_DEV_CLIENT_ID }}
+          FIANU_CLIENT_SECRET: ${{ secrets.FIANU_DEV_CLIENT_SECRET }}
+          FIANU_HOST: https://fianu-dev.fianu.io
+        run: |
+          echo "Deploying to $FIANU_HOST"
+          ./scripts/apply-all.sh dist/
 
-      # 5. Display results
-      - name: Display deployment results
-        uses: ./.github/actions/display-results
-        with:
-          deployed-count: ${{ steps.deploy.outputs.deployed-count }}
-          failed-count: ${{ steps.deploy.outputs.failed-count }}
-          total-count: ${{ steps.deploy.outputs.total-count }}
-          failed-packages: ${{ steps.deploy.outputs.failed-packages }}
-          success-rate: ${{ steps.deploy.outputs.success-rate }}
-          summary: ${{ steps.deploy.outputs.summary }}
+      # 5. Check deployment status
+      - name: Check deployment status
+        if: failure()
+        run: |
+          echo "::error::Deployment failed. Check logs above for details."
+          exit 1

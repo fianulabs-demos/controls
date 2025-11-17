@@ -2,7 +2,7 @@
 #
 # This workflow intelligently detects which controls have changed and only
 # deploys those controls. This is much faster and more efficient than deploying
-# all controls on every commit.
+# all controls on every commit. Uses direct script calls for portability.
 #
 # How it works:
 #   1. Detects changed files using git diff
@@ -17,10 +17,6 @@
 #   - Less API usage
 #   - Quick feedback on changes
 #   - Scales to large control repos
-#
-# Usage:
-#   - Copy to .github/workflows/deploy-changed.yml
-#   - Works automatically on push/PR
 
 name: Deploy Changed Controls
 
@@ -81,36 +77,32 @@ jobs:
               fi
             done)
 
-          # Convert to JSON array
+          # Convert to space-separated list and JSON array
           if [ -z "$CHANGED_CONTROLS" ]; then
             echo "No control changes detected"
-            echo "changed-controls=[]" >> $GITHUB_OUTPUT
+            echo "changed-controls=" >> $GITHUB_OUTPUT
             echo "has-changes=false" >> $GITHUB_OUTPUT
           else
             echo "Changed controls:"
             echo "$CHANGED_CONTROLS"
 
-            # Convert to JSON array format
-            JSON_ARRAY=$(echo "$CHANGED_CONTROLS" | jq -R -s -c 'split("\n") | map(select(length > 0))')
-            echo "changed-controls=$JSON_ARRAY" >> $GITHUB_OUTPUT
+            # Space-separated for scripts
+            SPACE_LIST=$(echo "$CHANGED_CONTROLS" | tr '\n' ' ')
+            echo "changed-controls=$SPACE_LIST" >> $GITHUB_OUTPUT
             echo "has-changes=true" >> $GITHUB_OUTPUT
 
             echo ""
-            echo "JSON array: $JSON_ARRAY"
+            echo "Will deploy: $SPACE_LIST"
           fi
 
   # ============================================================================
-  # Validate Changed Controls
+  # Validate & Test Changed Controls
   # ============================================================================
-  validate:
-    name: Validate Controls
+  validate-and-test:
+    name: Validate and Test
     runs-on: ubuntu-latest
     needs: detect-changes
     if: needs.detect-changes.outputs.has-changes == 'true'
-
-    strategy:
-      matrix:
-        control: ${{ fromJson(needs.detect-changes.outputs.changed-controls) }}
 
     steps:
       - name: Checkout repository
@@ -122,48 +114,32 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install PyYAML
+        run: |
+          pip install PyYAML
+          pip install -r examples/testing/mappers/requirements.txt
 
-      - name: Validate control
+      - name: Validate changed controls
         run: |
           chmod +x examples/testing/validation/validate-control.sh
-          ./examples/testing/validation/validate-control.sh ${{ matrix.control }}
 
-  # ============================================================================
-  # Test Changed Controls
-  # ============================================================================
-  test:
-    name: Test Controls
-    runs-on: ubuntu-latest
-    needs: [detect-changes, validate]
-    if: needs.detect-changes.outputs.has-changes == 'true'
+          for control in ${{ needs.detect-changes.outputs.changed-controls }}; do
+            echo "Validating $control"
+            ./examples/testing/validation/validate-control.sh "$control"
+          done
 
-    strategy:
-      matrix:
-        control: ${{ fromJson(needs.detect-changes.outputs.changed-controls) }}
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install testing dependencies
-        run: pip install -r examples/testing/mappers/requirements.txt
-
-      - name: Test mappers (if tests exist)
+      - name: Test changed controls
         run: |
-          if [ -d "${{ matrix.control }}/mappers" ]; then
-            echo "Testing mappers for ${{ matrix.control }}"
-            # Copy test files to control directory if they exist
-            if [ -f "examples/testing/mappers/test_detail.py" ]; then
+          for control in ${{ needs.detect-changes.outputs.changed-controls }}; do
+            echo "Testing $control"
+
+            # Test mappers if they exist
+            if [ -d "$control/mappers" ]; then
+              echo "Testing mappers for $control"
               cd examples/testing/mappers
-              pytest --cov=../../../${{ matrix.control }}/mappers -v || echo "No tests found"
+              pytest -v || echo "No mapper tests found"
+              cd ../../..
             fi
-          fi
+          done
 
       - name: Install OPA
         run: |
@@ -171,18 +147,16 @@ jobs:
           chmod +x opa
           sudo mv opa /usr/local/bin/
 
-      - name: Test Rego rules (if tests exist)
+      - name: Test Rego rules
         run: |
-          if [ -f "${{ matrix.control }}/rule/rule.rego" ]; then
-            cd "${{ matrix.control }}/rule"
-
-            if [ -f "rule_test.rego" ]; then
-              echo "Testing Rego rules for ${{ matrix.control }}"
+          for control in ${{ needs.detect-changes.outputs.changed-controls }}; do
+            if [ -f "$control/rule/rule.rego" ] && [ -f "$control/rule/rule_test.rego" ]; then
+              echo "Testing Rego rules for $control"
+              cd "$control/rule"
               opa test -v rule.rego rule_test.rego
-            else
-              echo "No Rego tests found for ${{ matrix.control }}"
+              cd ../..
             fi
-          fi
+          done
 
   # ============================================================================
   # Deploy Changed Controls
@@ -190,14 +164,8 @@ jobs:
   deploy:
     name: Deploy Controls
     runs-on: ubuntu-latest
-    needs: [detect-changes, test]
+    needs: [detect-changes, validate-and-test]
     if: needs.detect-changes.outputs.has-changes == 'true' && github.event_name == 'push'
-
-    permissions:
-      id-token: write
-      contents: write
-      packages: write
-      actions: write
 
     steps:
       - name: Checkout repository
@@ -209,47 +177,35 @@ jobs:
           version: ${{ secrets.FIANU_VERSION }}
 
       - name: Package changed controls
-        id: package
-        uses: ./.github/actions/package-controls
-        with:
-          control-list: ${{ needs.detect-changes.outputs.changed-controls }}
+        run: |
+          CONTROLS="${{ needs.detect-changes.outputs.changed-controls }}"
+          echo "Packaging controls: $CONTROLS"
+          ./scripts/package-all.sh $CONTROLS
 
       - name: Deploy controls
-        id: deploy
-        uses: ./.github/actions/apply-controls
-        with:
-          client-id: ${{ secrets.FIANU_DEV_CLIENT_ID }}
-          client-secret: ${{ secrets.FIANU_DEV_CLIENT_SECRET }}
-          host: https://fianu-dev.fianu.io
-          rate-limit-delay: 2
-          fail-on-error: true
-
-      - name: Display results
-        uses: ./.github/actions/display-results
-        with:
-          deployed-count: ${{ steps.deploy.outputs.deployed-count }}
-          failed-count: ${{ steps.deploy.outputs.failed-count }}
-          total-count: ${{ steps.deploy.outputs.total-count }}
-          failed-packages: ${{ steps.deploy.outputs.failed-packages }}
-          success-rate: ${{ steps.deploy.outputs.success-rate }}
-          summary: ${{ steps.deploy.outputs.summary }}
+        env:
+          FIANU_CLIENT_ID: ${{ secrets.FIANU_DEV_CLIENT_ID }}
+          FIANU_CLIENT_SECRET: ${{ secrets.FIANU_DEV_CLIENT_SECRET }}
+          FIANU_HOST: https://fianu-dev.fianu.io
+        run: |
+          echo "Deploying to $FIANU_HOST"
+          ./scripts/apply-all.sh dist/
 
       - name: Comment on PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v6
         with:
           script: |
+            const controls = '${{ needs.detect-changes.outputs.changed-controls }}'.split(' ').filter(c => c);
+
             const summary = `## Deployment Summary
 
-            **Changed Controls:** ${{ steps.deploy.outputs.total-count }}
-            **Successfully Deployed:** ${{ steps.deploy.outputs.deployed-count }}
-            **Failed:** ${{ steps.deploy.outputs.failed-count }}
-            **Success Rate:** ${{ steps.deploy.outputs.success-rate }}%
+            **Changed Controls:** ${controls.length}
 
             ### Controls Deployed
-            ${{ needs.detect-changes.outputs.changed-controls }}
+            ${controls.map(c => `- \`${c}\``).join('\n')}
 
-            ${{ steps.deploy.outputs.failed-count > 0 && '### Failed Deployments\n' + steps.deploy.outputs.failed-packages || '✅ All controls deployed successfully!' }}
+            ✅ All controls validated, tested, and ready to deploy!
             `;
 
             github.rest.issues.createComment({

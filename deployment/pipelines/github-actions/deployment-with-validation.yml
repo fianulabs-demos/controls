@@ -2,6 +2,7 @@
 #
 # This workflow adds validation and testing stages before deployment.
 # This is the RECOMMENDED approach for production deployments.
+# Uses direct script calls for portability.
 #
 # Pipeline stages:
 #   1. Validate - File structure, syntax, schema validation
@@ -12,7 +13,7 @@
 # Usage:
 #   - Copy to .github/workflows/deploy-with-validation.yml
 #   - Configure secrets
-#   - Update control-list
+#   - Update CONTROLS variable
 
 name: Deploy Controls - With Validation
 
@@ -24,6 +25,10 @@ on:
     branches:
       - main
   workflow_dispatch:
+
+env:
+  # List of controls to deploy (space-separated)
+  CONTROLS_DIR: "controls"
 
 jobs:
   # ============================================================================
@@ -100,23 +105,19 @@ jobs:
 
       - name: Upload coverage reports
         uses: codecov/codecov-action@v3
+        if: always()
         with:
           files: ./coverage.xml
           flags: mappers
 
   # ============================================================================
-  # Stage 3: Package
+  # Stage 3: Package & Deploy
   # ============================================================================
-  package:
-    name: Package Controls
+  deploy:
+    name: Package and Deploy
     runs-on: ubuntu-latest
     needs: test  # Only run if tests pass
-
-    permissions:
-      id-token: write
-      contents: write
-      packages: write
-      actions: write
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout repository
@@ -128,68 +129,58 @@ jobs:
           version: ${{ secrets.FIANU_VERSION }}
 
       - name: Package controls
-        id: package
-        uses: ./.github/actions/package-controls
-        with:
-          control-list: '["ci.commit.codereview", "snyk.sast.vulnerabilities"]'
+        run: |
+          echo "Packaging controls: $CONTROLS_DIR"
+          ./scripts/package-all.sh $CONTROLS_DIR
 
       - name: Upload packages as artifacts
         uses: actions/upload-artifact@v3
         with:
           name: control-packages
-          path: '*.tgz'
+          path: 'dist/*.tgz'
           retention-days: 7
 
-  # ============================================================================
-  # Stage 4: Deploy
-  # ============================================================================
-  deploy:
-    name: Deploy Controls
-    runs-on: ubuntu-latest
-    needs: package  # Only run if packaging succeeds
+      - name: Deploy controls
+        env:
+          FIANU_CLIENT_ID: ${{ secrets.FIANU_DEV_CLIENT_ID }}
+          FIANU_CLIENT_SECRET: ${{ secrets.FIANU_DEV_CLIENT_SECRET }}
+          FIANU_HOST: https://fianu-dev.fianu.io
+        run: |
+          echo "Deploying to $FIANU_HOST"
+          ./scripts/apply-all.sh dist/
 
-    permissions:
-      id-token: write
-      contents: write
-      packages: write
-      actions: write
+      - name: Check deployment status
+        if: failure()
+        run: |
+          echo "::error::Deployment failed. Check logs above for details."
+          exit 1
+
+  # ============================================================================
+  # Summary (runs on PRs)
+  # ============================================================================
+  summary:
+    name: PR Summary
+    runs-on: ubuntu-latest
+    needs: [validate, test]
+    if: github.event_name == 'pull_request'
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Setup Fianu CLI
-        uses: fianulabs/actions@main
+      - name: Comment on PR
+        uses: actions/github-script@v6
         with:
-          version: ${{ secrets.FIANU_VERSION }}
+          script: |
+            const summary = `## Validation & Test Summary
 
-      - name: Download packages
-        uses: actions/download-artifact@v3
-        with:
-          name: control-packages
+            ✅ **Validation:** Passed
+            ✅ **Mapper Tests:** Passed
+            ✅ **Rego Tests:** Passed
 
-      - name: Deploy controls
-        id: deploy
-        uses: ./.github/actions/apply-controls
-        with:
-          client-id: ${{ secrets.FIANU_DEV_CLIENT_ID }}
-          client-secret: ${{ secrets.FIANU_DEV_CLIENT_SECRET }}
-          host: https://fianu-dev.fianu.io
-          rate-limit-delay: 2
-          fail-on-error: true
+            Ready to merge and deploy!
+            `;
 
-      - name: Display deployment results
-        uses: ./.github/actions/display-results
-        with:
-          deployed-count: ${{ steps.deploy.outputs.deployed-count }}
-          failed-count: ${{ steps.deploy.outputs.failed-count }}
-          total-count: ${{ steps.deploy.outputs.total-count }}
-          failed-packages: ${{ steps.deploy.outputs.failed-packages }}
-          success-rate: ${{ steps.deploy.outputs.success-rate }}
-          summary: ${{ steps.deploy.outputs.summary }}
-
-      - name: Fail if deployment failed
-        if: steps.deploy.outputs.failed-count > 0
-        run: |
-          echo "::error::${{ steps.deploy.outputs.failed-count }} control(s) failed to deploy"
-          exit 1
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });

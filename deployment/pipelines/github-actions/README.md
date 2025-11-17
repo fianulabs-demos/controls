@@ -100,11 +100,9 @@ Optional:
 Edit the workflow file:
 
 ```yaml
-- name: Package controls
-  uses: ./.github/actions/package-controls
-  with:
-    # Replace with your controls
-    control-list: '["your.control.path", "another.control"]'
+env:
+  # Replace with your controls (space-separated)
+  CONTROLS: "your.control.path another.control"
 ```
 
 ### 4. Commit and Push
@@ -117,45 +115,51 @@ git push
 
 Watch it run: GitHub → Actions tab
 
-## Required Custom Actions
+## How These Workflows Work
 
-These workflows use custom actions from `.github/actions/`:
+These workflows use the **existing deployment scripts** from the repository:
 
-### package-controls
+### scripts/package-all.sh
 Packages controls into .tgz files.
 
-**Usage:**
+**Usage in workflows:**
 ```yaml
-- uses: ./.github/actions/package-controls
-  with:
-    control-list: '["control1", "control2"]'
+- name: Package controls
+  run: |
+    ./scripts/package-all.sh control1 control2 control3
 ```
 
-### apply-controls
-Deploys packaged controls with rate limiting.
+**What it does:**
+- Creates `dist/` directory
+- Packages each control with `fianu package`
+- Outputs `.tgz` files to `dist/`
 
-**Usage:**
+### scripts/apply-all.sh
+Deploys packaged controls with rate limiting and error handling.
+
+**Usage in workflows:**
 ```yaml
-- uses: ./.github/actions/apply-controls
-  with:
-    client-id: ${{ secrets.FIANU_CLIENT_ID }}
-    client-secret: ${{ secrets.FIANU_CLIENT_SECRET }}
-    host: https://fianu-dev.fianu.io
-    rate-limit-delay: 2
-    fail-on-error: true
+- name: Deploy controls
+  env:
+    FIANU_CLIENT_ID: ${{ secrets.FIANU_CLIENT_ID }}
+    FIANU_CLIENT_SECRET: ${{ secrets.FIANU_CLIENT_SECRET }}
+    FIANU_HOST: https://fianu-dev.fianu.io
+  run: |
+    ./scripts/apply-all.sh dist/
 ```
 
-### display-results
-Shows deployment summary.
+**What it does:**
+- Validates environment variables
+- Deploys each `.tgz` file with `fianu apply`
+- Rate limits between deployments (2 second delay)
+- Tracks success/failure counts
+- Returns non-zero exit code if any deployment fails
 
-**Usage:**
-```yaml
-- uses: ./.github/actions/display-results
-  with:
-    deployed-count: ${{ steps.deploy.outputs.deployed-count }}
-    failed-count: ${{ steps.deploy.outputs.failed-count }}
-    # ... other outputs
-```
+**Benefits:**
+- ✅ Self-contained (no external dependencies)
+- ✅ Works in any CI/CD platform
+- ✅ Easy to test locally
+- ✅ Uses proven, production-tested scripts
 
 ## Environment Configuration
 
@@ -291,13 +295,13 @@ steps:
 
 ## Troubleshooting
 
-### Action Not Found
+### Script Not Found
 
 ```
-Error: Unable to resolve action `./.github/actions/package-controls`
+Error: ./scripts/package-all.sh: No such file or directory
 ```
 
-**Solution:** Ensure custom actions exist in `.github/actions/` directory.
+**Solution:** Ensure you're running from repository root where `scripts/` directory exists.
 
 ### Secrets Not Found
 

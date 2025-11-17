@@ -2,6 +2,7 @@
 #
 # This workflow demonstrates deploying controls through multiple environments
 # with approval gates and environment-specific configurations.
+# Uses direct script calls for portability.
 #
 # Promotion Flow:
 #   DEV (automatic) → QA (automatic) → PROD (manual approval)
@@ -12,11 +13,6 @@
 #   - Manual approval required for prod
 #   - Environment-specific secrets
 #   - Full validation and testing before each environment
-#
-# Usage:
-#   - Configure GitHub Environments: dev, qa, prod
-#   - Set environment protection rules for prod (required reviewers)
-#   - Configure secrets per environment
 
 name: Deploy - Multi-Environment
 
@@ -34,6 +30,10 @@ on:
           - dev
           - qa
           - prod
+
+env:
+  # List of controls to deploy (space-separated)
+  CONTROLS_DIR: "controls"
 
 jobs:
   # ============================================================================
@@ -97,12 +97,6 @@ jobs:
       name: dev
       url: https://fianu-dev.fianu.io
 
-    permissions:
-      id-token: write
-      contents: write
-      packages: write
-      actions: write
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -113,30 +107,18 @@ jobs:
           version: ${{ secrets.FIANU_VERSION }}
 
       - name: Package controls
-        id: package
-        uses: ./.github/actions/package-controls
-        with:
-          control-list: '["ci.commit.codereview", "snyk.sast.vulnerabilities"]'
+        run: |
+          echo "Packaging controls: $CONTROLS_DIR"
+          ./scripts/package-all.sh $CONTROLS_DIR
 
       - name: Deploy to DEV
-        id: deploy
-        uses: ./.github/actions/apply-controls
-        with:
-          client-id: ${{ secrets.FIANU_DEV_CLIENT_ID }}
-          client-secret: ${{ secrets.FIANU_DEV_CLIENT_SECRET }}
-          host: https://fianu-dev.fianu.io
-          rate-limit-delay: 2
-          fail-on-error: true
-
-      - name: Display results
-        uses: ./.github/actions/display-results
-        with:
-          deployed-count: ${{ steps.deploy.outputs.deployed-count }}
-          failed-count: ${{ steps.deploy.outputs.failed-count }}
-          total-count: ${{ steps.deploy.outputs.total-count }}
-          failed-packages: ${{ steps.deploy.outputs.failed-packages }}
-          success-rate: ${{ steps.deploy.outputs.success-rate }}
-          summary: ${{ steps.deploy.outputs.summary }}
+        env:
+          FIANU_CLIENT_ID: ${{ secrets.FIANU_DEV_CLIENT_ID }}
+          FIANU_CLIENT_SECRET: ${{ secrets.FIANU_DEV_CLIENT_SECRET }}
+          FIANU_HOST: https://fianu-dev.fianu.io
+        run: |
+          echo "Deploying to DEV: $FIANU_HOST"
+          ./scripts/apply-all.sh dist/
 
   # ============================================================================
   # Deploy to QA
@@ -151,12 +133,6 @@ jobs:
       name: qa
       url: https://fianu-qa.fianu.io
 
-    permissions:
-      id-token: write
-      contents: write
-      packages: write
-      actions: write
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -167,30 +143,18 @@ jobs:
           version: ${{ secrets.FIANU_VERSION }}
 
       - name: Package controls
-        id: package
-        uses: ./.github/actions/package-controls
-        with:
-          control-list: '["ci.commit.codereview", "snyk.sast.vulnerabilities"]'
+        run: |
+          echo "Packaging controls: $CONTROLS_DIR"
+          ./scripts/package-all.sh $CONTROLS_DIR
 
       - name: Deploy to QA
-        id: deploy
-        uses: ./.github/actions/apply-controls
-        with:
-          client-id: ${{ secrets.FIANU_QA_CLIENT_ID }}
-          client-secret: ${{ secrets.FIANU_QA_CLIENT_SECRET }}
-          host: https://fianu-qa.fianu.io
-          rate-limit-delay: 2
-          fail-on-error: true
-
-      - name: Display results
-        uses: ./.github/actions/display-results
-        with:
-          deployed-count: ${{ steps.deploy.outputs.deployed-count }}
-          failed-count: ${{ steps.deploy.outputs.failed-count }}
-          total-count: ${{ steps.deploy.outputs.total-count }}
-          failed-packages: ${{ steps.deploy.outputs.failed-packages }}
-          success-rate: ${{ steps.deploy.outputs.success-rate }}
-          summary: ${{ steps.deploy.outputs.summary }}
+        env:
+          FIANU_CLIENT_ID: ${{ secrets.FIANU_QA_CLIENT_ID }}
+          FIANU_CLIENT_SECRET: ${{ secrets.FIANU_QA_CLIENT_SECRET }}
+          FIANU_HOST: https://fianu-qa.fianu.io
+        run: |
+          echo "Deploying to QA: $FIANU_HOST"
+          ./scripts/apply-all.sh dist/
 
   # ============================================================================
   # Deploy to PROD (Manual Approval Required)
@@ -205,12 +169,6 @@ jobs:
       name: prod
       url: https://app.fianu.io
 
-    permissions:
-      id-token: write
-      contents: write
-      packages: write
-      actions: write
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -221,30 +179,19 @@ jobs:
           version: ${{ secrets.FIANU_VERSION }}
 
       - name: Package controls
-        id: package
-        uses: ./.github/actions/package-controls
-        with:
-          control-list: '["ci.commit.codereview", "snyk.sast.vulnerabilities"]'
+        run: |
+          echo "Packaging controls: $CONTROLS_DIR"
+          ./scripts/package-all.sh $CONTROLS_DIR
 
       - name: Deploy to PROD
-        id: deploy
-        uses: ./.github/actions/apply-controls
-        with:
-          client-id: ${{ secrets.PROD_FIANU_CLIENT_ID }}
-          client-secret: ${{ secrets.PROD_FIANU_CLIENT_SECRET }}
-          host: https://app.fianu.io
-          rate-limit-delay: 3  # Slower rate limit for prod
-          fail-on-error: true
-
-      - name: Display results
-        uses: ./.github/actions/display-results
-        with:
-          deployed-count: ${{ steps.deploy.outputs.deployed-count }}
-          failed-count: ${{ steps.deploy.outputs.failed-count }}
-          total-count: ${{ steps.deploy.outputs.total-count }}
-          failed-packages: ${{ steps.deploy.outputs.failed-packages }}
-          success-rate: ${{ steps.deploy.outputs.success-rate }}
-          summary: ${{ steps.deploy.outputs.summary }}
+        env:
+          FIANU_CLIENT_ID: ${{ secrets.PROD_FIANU_CLIENT_ID }}
+          FIANU_CLIENT_SECRET: ${{ secrets.PROD_FIANU_CLIENT_SECRET }}
+          FIANU_HOST: https://app.fianu.io
+        run: |
+          echo "Deploying to PRODUCTION: $FIANU_HOST"
+          # Slower rate limit for prod (configured in apply-all.sh or override here)
+          ./scripts/apply-all.sh dist/
 
       - name: Create release tag
         if: success()
@@ -265,16 +212,14 @@ jobs:
     if: always()
 
     steps:
-      - name: Send Slack notification
-        if: always()
-        uses: 8398a7/action-slack@v3
-        with:
-          status: ${{ job.status }}
-          text: |
-            Control Deployment Status:
-            - DEV: ${{ needs.deploy-dev.result }}
-            - QA: ${{ needs.deploy-qa.result }}
-            - PROD: ${{ needs.deploy-prod.result }}
-          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+      - name: Send notification
+        run: |
+          echo "Deployment completed!"
+          echo "DEV: ${{ needs.deploy-dev.result }}"
+          echo "QA: ${{ needs.deploy-qa.result }}"
+          echo "PROD: ${{ needs.deploy-prod.result }}"
+
+          # Add Slack/email notification here
+          # Example:
+          # curl -X POST $SLACK_WEBHOOK \
+          #   -d '{"text":"Deployment: DEV=${{ needs.deploy-dev.result }}, QA=${{ needs.deploy-qa.result }}, PROD=${{ needs.deploy-prod.result }}"}'
