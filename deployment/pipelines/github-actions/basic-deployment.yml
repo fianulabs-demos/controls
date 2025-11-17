@@ -28,7 +28,7 @@ on:
 
 env:
   # List of controls to deploy (space-separated)
-  CONTROLS: "ci.commit.codereview snyk.sast.vulnerabilities"
+  CONTROLS_DIR: "controls"
 
 jobs:
   deploy:
@@ -48,15 +48,15 @@ jobs:
       # 3. Package controls
       - name: Package controls
         run: |
-          echo "Packaging controls: $CONTROLS"
-          ./scripts/package-all.sh $CONTROLS
+          echo "Packaging controls: $CONTROLS_DIR"
+          ./scripts/package-all.sh $CONTROLS_DIR
 
       # 4. Deploy controls
       - name: Deploy controls
         env:
           FIANU_CLIENT_ID: ${{ secrets.FIANU_DEV_CLIENT_ID }}
           FIANU_CLIENT_SECRET: ${{ secrets.FIANU_DEV_CLIENT_SECRET }}
-          FIANU_HOST: https://fianu-dev.fianu.io
+          FIANU_HOST: https://app.fianu.io
         run: |
           echo "Deploying to $FIANU_HOST"
           ./scripts/apply-all.sh dist/
