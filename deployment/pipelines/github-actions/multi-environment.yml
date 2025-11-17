@@ -1,0 +1,280 @@
+# Multi-Environment Deployment Workflow
+#
+# This workflow demonstrates deploying controls through multiple environments
+# with approval gates and environment-specific configurations.
+#
+# Promotion Flow:
+#   DEV (automatic) → QA (automatic) → PROD (manual approval)
+#
+# Features:
+#   - Automatic deployment to dev on push to main
+#   - Automatic deployment to qa after dev succeeds
+#   - Manual approval required for prod
+#   - Environment-specific secrets
+#   - Full validation and testing before each environment
+#
+# Usage:
+#   - Configure GitHub Environments: dev, qa, prod
+#   - Set environment protection rules for prod (required reviewers)
+#   - Configure secrets per environment
+
+name: Deploy - Multi-Environment
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+
+jobs:
+  # ============================================================================
+  # Validation and Testing (runs once for all environments)
+  # ============================================================================
+  validate-and-test:
+    name: Validate and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install PyYAML
+          pip install -r examples/testing/mappers/requirements.txt
+
+      - name: Validate controls
+        run: |
+          chmod +x examples/testing/validation/*.sh
+          ./examples/testing/validation/validate-all.sh
+
+      - name: Run mapper tests
+        run: |
+          cd examples/testing/mappers
+          pytest --cov=../../mappers --cov-report=term
+
+      - name: Install OPA
+        run: |
+          curl -L -o opa https://openpolicyagent.org/downloads/latest/opa_linux_amd64
+          chmod +x opa
+          sudo mv opa /usr/local/bin/
+
+      - name: Run Rego tests
+        run: |
+          for control_dir in */; do
+            if [ -f "$control_dir/rule/rule.rego" ] && [ -f "$control_dir/rule/rule_test.rego" ]; then
+              echo "Testing $control_dir"
+              cd "$control_dir/rule"
+              opa test -v rule.rego rule_test.rego
+              cd ../..
+            fi
+          done
+
+  # ============================================================================
+  # Deploy to DEV
+  # ============================================================================
+  deploy-dev:
+    name: Deploy to DEV
+    runs-on: ubuntu-latest
+    needs: validate-and-test
+    if: github.event_name == 'push' || github.event.inputs.environment == 'dev'
+
+    environment:
+      name: dev
+      url: https://fianu-dev.fianu.io
+
+    permissions:
+      id-token: write
+      contents: write
+      packages: write
+      actions: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Fianu CLI
+        uses: fianulabs/actions@main
+        with:
+          version: ${{ secrets.FIANU_VERSION }}
+
+      - name: Package controls
+        id: package
+        uses: ./.github/actions/package-controls
+        with:
+          control-list: '["ci.commit.codereview", "snyk.sast.vulnerabilities"]'
+
+      - name: Deploy to DEV
+        id: deploy
+        uses: ./.github/actions/apply-controls
+        with:
+          client-id: ${{ secrets.FIANU_DEV_CLIENT_ID }}
+          client-secret: ${{ secrets.FIANU_DEV_CLIENT_SECRET }}
+          host: https://fianu-dev.fianu.io
+          rate-limit-delay: 2
+          fail-on-error: true
+
+      - name: Display results
+        uses: ./.github/actions/display-results
+        with:
+          deployed-count: ${{ steps.deploy.outputs.deployed-count }}
+          failed-count: ${{ steps.deploy.outputs.failed-count }}
+          total-count: ${{ steps.deploy.outputs.total-count }}
+          failed-packages: ${{ steps.deploy.outputs.failed-packages }}
+          success-rate: ${{ steps.deploy.outputs.success-rate }}
+          summary: ${{ steps.deploy.outputs.summary }}
+
+  # ============================================================================
+  # Deploy to QA
+  # ============================================================================
+  deploy-qa:
+    name: Deploy to QA
+    runs-on: ubuntu-latest
+    needs: deploy-dev
+    if: success() && (github.event_name == 'push' || github.event.inputs.environment == 'qa')
+
+    environment:
+      name: qa
+      url: https://fianu-qa.fianu.io
+
+    permissions:
+      id-token: write
+      contents: write
+      packages: write
+      actions: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Fianu CLI
+        uses: fianulabs/actions@main
+        with:
+          version: ${{ secrets.FIANU_VERSION }}
+
+      - name: Package controls
+        id: package
+        uses: ./.github/actions/package-controls
+        with:
+          control-list: '["ci.commit.codereview", "snyk.sast.vulnerabilities"]'
+
+      - name: Deploy to QA
+        id: deploy
+        uses: ./.github/actions/apply-controls
+        with:
+          client-id: ${{ secrets.FIANU_QA_CLIENT_ID }}
+          client-secret: ${{ secrets.FIANU_QA_CLIENT_SECRET }}
+          host: https://fianu-qa.fianu.io
+          rate-limit-delay: 2
+          fail-on-error: true
+
+      - name: Display results
+        uses: ./.github/actions/display-results
+        with:
+          deployed-count: ${{ steps.deploy.outputs.deployed-count }}
+          failed-count: ${{ steps.deploy.outputs.failed-count }}
+          total-count: ${{ steps.deploy.outputs.total-count }}
+          failed-packages: ${{ steps.deploy.outputs.failed-packages }}
+          success-rate: ${{ steps.deploy.outputs.success-rate }}
+          summary: ${{ steps.deploy.outputs.summary }}
+
+  # ============================================================================
+  # Deploy to PROD (Manual Approval Required)
+  # ============================================================================
+  deploy-prod:
+    name: Deploy to PROD
+    runs-on: ubuntu-latest
+    needs: deploy-qa
+    if: success() && (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
+
+    environment:
+      name: prod
+      url: https://app.fianu.io
+
+    permissions:
+      id-token: write
+      contents: write
+      packages: write
+      actions: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Fianu CLI
+        uses: fianulabs/actions@main
+        with:
+          version: ${{ secrets.FIANU_VERSION }}
+
+      - name: Package controls
+        id: package
+        uses: ./.github/actions/package-controls
+        with:
+          control-list: '["ci.commit.codereview", "snyk.sast.vulnerabilities"]'
+
+      - name: Deploy to PROD
+        id: deploy
+        uses: ./.github/actions/apply-controls
+        with:
+          client-id: ${{ secrets.PROD_FIANU_CLIENT_ID }}
+          client-secret: ${{ secrets.PROD_FIANU_CLIENT_SECRET }}
+          host: https://app.fianu.io
+          rate-limit-delay: 3  # Slower rate limit for prod
+          fail-on-error: true
+
+      - name: Display results
+        uses: ./.github/actions/display-results
+        with:
+          deployed-count: ${{ steps.deploy.outputs.deployed-count }}
+          failed-count: ${{ steps.deploy.outputs.failed-count }}
+          total-count: ${{ steps.deploy.outputs.total-count }}
+          failed-packages: ${{ steps.deploy.outputs.failed-packages }}
+          success-rate: ${{ steps.deploy.outputs.success-rate }}
+          summary: ${{ steps.deploy.outputs.summary }}
+
+      - name: Create release tag
+        if: success()
+        run: |
+          TAG="release-$(date +%Y%m%d-%H%M%S)"
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git tag -a "$TAG" -m "Production release: $TAG"
+          git push origin "$TAG"
+
+  # ============================================================================
+  # Notify
+  # ============================================================================
+  notify:
+    name: Notify Team
+    runs-on: ubuntu-latest
+    needs: [deploy-dev, deploy-qa, deploy-prod]
+    if: always()
+
+    steps:
+      - name: Send Slack notification
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: |
+            Control Deployment Status:
+            - DEV: ${{ needs.deploy-dev.result }}
+            - QA: ${{ needs.deploy-qa.result }}
+            - PROD: ${{ needs.deploy-prod.result }}
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}

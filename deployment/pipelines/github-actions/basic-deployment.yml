@@ -1,0 +1,79 @@
+# Basic Deployment Workflow
+#
+# This workflow demonstrates a simple deployment pattern for Fianu official controls.
+# Based on the existing apply_fianulabs_dev.yaml workflow.
+#
+# Triggers:
+#   - Push to main branch
+#   - Manual workflow dispatch
+#
+# What it does:
+#   1. Checks out code
+#   2. Sets up Fianu CLI
+#   3. Packages controls
+#   4. Deploys to Fianu environment
+#
+# Usage:
+#   - Copy to .github/workflows/deploy-dev.yml
+#   - Configure secrets: FIANU_DEV_CLIENT_ID, FIANU_DEV_CLIENT_SECRET
+#   - Update control-list with your controls
+
+name: Deploy Controls - Basic
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    # Required permissions
+    permissions:
+      id-token: write
+      contents: write
+      packages: write
+      actions: write
+
+    steps:
+      # 1. Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # 2. Setup Fianu CLI
+      - name: Setup Fianu CLI
+        uses: fianulabs/actions@main
+        with:
+          version: ${{ secrets.FIANU_VERSION }}
+
+      # 3. Package controls
+      # Update this list with your controls
+      - name: Package controls
+        id: package
+        uses: ./.github/actions/package-controls
+        with:
+          control-list: '["ci.commit.codereview", "snyk.sast.vulnerabilities"]'
+
+      # 4. Deploy controls
+      - name: Deploy controls
+        id: deploy
+        uses: ./.github/actions/apply-controls
+        with:
+          client-id: ${{ secrets.FIANU_DEV_CLIENT_ID }}
+          client-secret: ${{ secrets.FIANU_DEV_CLIENT_SECRET }}
+          host: https://fianu-dev.fianu.io
+          rate-limit-delay: 2  # Seconds between deployments
+          fail-on-error: true   # Fail workflow if any control fails
+
+      # 5. Display results
+      - name: Display deployment results
+        uses: ./.github/actions/display-results
+        with:
+          deployed-count: ${{ steps.deploy.outputs.deployed-count }}
+          failed-count: ${{ steps.deploy.outputs.failed-count }}
+          total-count: ${{ steps.deploy.outputs.total-count }}
+          failed-packages: ${{ steps.deploy.outputs.failed-packages }}
+          success-rate: ${{ steps.deploy.outputs.success-rate }}
+          summary: ${{ steps.deploy.outputs.summary }}

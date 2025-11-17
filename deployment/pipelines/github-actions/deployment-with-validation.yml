@@ -1,0 +1,195 @@
+# Deployment with Validation Workflow
+#
+# This workflow adds validation and testing stages before deployment.
+# This is the RECOMMENDED approach for production deployments.
+#
+# Pipeline stages:
+#   1. Validate - File structure, syntax, schema validation
+#   2. Test - Run mapper tests (pytest) and Rego tests (OPA)
+#   3. Package - Bundle controls
+#   4. Deploy - Push to Fianu environment
+#
+# Usage:
+#   - Copy to .github/workflows/deploy-with-validation.yml
+#   - Configure secrets
+#   - Update control-list
+
+name: Deploy Controls - With Validation
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  # ============================================================================
+  # Stage 1: Validate
+  # ============================================================================
+  validate:
+    name: Validate Controls
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          pip install PyYAML
+
+      - name: Make validation scripts executable
+        run: |
+          chmod +x examples/testing/validation/*.sh
+
+      - name: Validate all controls
+        run: |
+          ./examples/testing/validation/validate-all.sh
+
+  # ============================================================================
+  # Stage 2: Test
+  # ============================================================================
+  test:
+    name: Test Controls
+    runs-on: ubuntu-latest
+    needs: validate  # Only run if validation passes
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install testing dependencies
+        run: |
+          pip install -r examples/testing/mappers/requirements.txt
+
+      - name: Run mapper tests
+        run: |
+          cd examples/testing/mappers
+          pytest --cov=../../mappers --cov-report=term --cov-report=xml
+
+      - name: Install OPA
+        run: |
+          curl -L -o opa https://openpolicyagent.org/downloads/latest/opa_linux_amd64
+          chmod +x opa
+          sudo mv opa /usr/local/bin/
+
+      - name: Run Rego tests
+        run: |
+          # Find all controls with rule tests
+          for control_dir in */; do
+            if [ -f "$control_dir/rule/rule.rego" ] && [ -f "$control_dir/rule/rule_test.rego" ]; then
+              echo "Testing $control_dir"
+              cd "$control_dir/rule"
+              opa test -v rule.rego rule_test.rego
+              cd ../..
+            fi
+          done
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+          flags: mappers
+
+  # ============================================================================
+  # Stage 3: Package
+  # ============================================================================
+  package:
+    name: Package Controls
+    runs-on: ubuntu-latest
+    needs: test  # Only run if tests pass
+
+    permissions:
+      id-token: write
+      contents: write
+      packages: write
+      actions: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Fianu CLI
+        uses: fianulabs/actions@main
+        with:
+          version: ${{ secrets.FIANU_VERSION }}
+
+      - name: Package controls
+        id: package
+        uses: ./.github/actions/package-controls
+        with:
+          control-list: '["ci.commit.codereview", "snyk.sast.vulnerabilities"]'
+
+      - name: Upload packages as artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: control-packages
+          path: '*.tgz'
+          retention-days: 7
+
+  # ============================================================================
+  # Stage 4: Deploy
+  # ============================================================================
+  deploy:
+    name: Deploy Controls
+    runs-on: ubuntu-latest
+    needs: package  # Only run if packaging succeeds
+
+    permissions:
+      id-token: write
+      contents: write
+      packages: write
+      actions: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Fianu CLI
+        uses: fianulabs/actions@main
+        with:
+          version: ${{ secrets.FIANU_VERSION }}
+
+      - name: Download packages
+        uses: actions/download-artifact@v3
+        with:
+          name: control-packages
+
+      - name: Deploy controls
+        id: deploy
+        uses: ./.github/actions/apply-controls
+        with:
+          client-id: ${{ secrets.FIANU_DEV_CLIENT_ID }}
+          client-secret: ${{ secrets.FIANU_DEV_CLIENT_SECRET }}
+          host: https://fianu-dev.fianu.io
+          rate-limit-delay: 2
+          fail-on-error: true
+
+      - name: Display deployment results
+        uses: ./.github/actions/display-results
+        with:
+          deployed-count: ${{ steps.deploy.outputs.deployed-count }}
+          failed-count: ${{ steps.deploy.outputs.failed-count }}
+          total-count: ${{ steps.deploy.outputs.total-count }}
+          failed-packages: ${{ steps.deploy.outputs.failed-packages }}
+          success-rate: ${{ steps.deploy.outputs.success-rate }}
+          summary: ${{ steps.deploy.outputs.summary }}
+
+      - name: Fail if deployment failed
+        if: steps.deploy.outputs.failed-count > 0
+        run: |
+          echo "::error::${{ steps.deploy.outputs.failed-count }} control(s) failed to deploy"
+          exit 1

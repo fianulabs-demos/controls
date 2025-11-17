@@ -1,0 +1,273 @@
+# GitLab CI/CD Pipeline for Fianu Official Controls
+#
+# This pipeline validates, tests, packages, and deploys controls to Fianu.
+# Translated from GitHub Actions workflows to GitLab CI/CD.
+#
+# Setup:
+#   1. Configure CI/CD variables in GitLab:
+#      - FIANU_DEV_CLIENT_ID
+#      - FIANU_DEV_CLIENT_SECRET
+#      - FIANU_HOST (default: https://fianu-dev.fianu.io)
+#
+#   2. Update CONTROLS variable with your control paths
+#
+#   3. Commit .gitlab-ci.yml to repository root
+
+# Pipeline stages
+stages:
+  - validate
+  - test
+  - package
+  - deploy
+
+# Global variables
+variables:
+  PYTHON_VERSION: "3.11"
+  OPA_VERSION: "latest"
+  FIANU_HOST: "https://fianu-dev.fianu.io"
+
+  # List of controls to deploy (update this)
+  CONTROLS: "ci.commit.codereview snyk.sast.vulnerabilities"
+
+# ============================================================================
+# Stage 1: Validate
+# ============================================================================
+
+validate:file-structure:
+  stage: validate
+  image: python:${PYTHON_VERSION}
+  before_script:
+    - pip install PyYAML
+  script:
+    - chmod +x examples/testing/validation/*.sh
+    - ./examples/testing/validation/validate-all.sh
+  only:
+    - branches
+  except:
+    - tags
+
+# ============================================================================
+# Stage 2: Test
+# ============================================================================
+
+test:mappers:
+  stage: test
+  image: python:${PYTHON_VERSION}
+  before_script:
+    - pip install -r examples/testing/mappers/requirements.txt
+  script:
+    - cd examples/testing/mappers
+    - pytest --cov=../../mappers --cov-report=term --cov-report=xml
+  coverage: '/(?i)total.*? (100(?:\.0+)?\%|[1-9]?\d(?:\.\d+)?\%)$/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: examples/testing/mappers/coverage.xml
+  only:
+    - branches
+  except:
+    - tags
+
+test:rego:
+  stage: test
+  image: openpolicyagent/opa:${OPA_VERSION}
+  script:
+    - |
+      for control_dir in */; do
+        if [ -f "$control_dir/rule/rule.rego" ] && [ -f "$control_dir/rule/rule_test.rego" ]; then
+          echo "Testing $control_dir"
+          cd "$control_dir/rule"
+          opa test -v rule.rego rule_test.rego
+          cd ../..
+        fi
+      done
+  only:
+    - branches
+  except:
+    - tags
+
+# ============================================================================
+# Stage 3: Package
+# ============================================================================
+
+package:controls:
+  stage: package
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl bash
+    # Install Fianu CLI
+    - curl -o fianu https://path-to-fianu-cli/fianu  # Update this URL
+    - chmod +x fianu
+    - mv fianu /usr/local/bin/
+  script:
+    - mkdir -p dist
+    - |
+      for control in $CONTROLS; do
+        echo "Packaging $control"
+        if [ -f "$control/contents.json" ]; then
+          fianu package --path "$control" -o "dist/$control.tgz"
+        else
+          echo "Warning: $control/contents.json not found, skipping"
+        fi
+      done
+    - ls -lh dist/
+  artifacts:
+    paths:
+      - dist/*.tgz
+    expire_in: 7 days
+  only:
+    - main
+    - develop
+
+# ============================================================================
+# Stage 4: Deploy
+# ============================================================================
+
+deploy:dev:
+  stage: deploy
+  image: alpine:latest
+  dependencies:
+    - package:controls
+  before_script:
+    - apk add --no-cache curl bash
+    # Install Fianu CLI
+    - curl -o fianu https://path-to-fianu-cli/fianu  # Update this URL
+    - chmod +x fianu
+    - mv fianu /usr/local/bin/
+  script:
+    - |
+      # Validate environment variables
+      if [ -z "$FIANU_DEV_CLIENT_ID" ] || [ -z "$FIANU_DEV_CLIENT_SECRET" ]; then
+        echo "Error: FIANU credentials not configured"
+        exit 1
+      fi
+
+      # Deploy each packaged control
+      DEPLOYED=0
+      FAILED=0
+
+      for package in dist/*.tgz; do
+        if [ -f "$package" ]; then
+          echo "Deploying $(basename $package)"
+
+          if fianu apply --path "$package"; then
+            echo "✓ Successfully deployed $(basename $package)"
+            ((DEPLOYED++))
+          else
+            echo "✗ Failed to deploy $(basename $package)"
+            ((FAILED++))
+          fi
+
+          # Rate limiting
+          sleep 2
+        fi
+      done
+
+      echo ""
+      echo "Deployment Summary:"
+      echo "  Deployed: $DEPLOYED"
+      echo "  Failed: $FAILED"
+
+      # Fail if any deployments failed
+      if [ $FAILED -gt 0 ]; then
+        exit 1
+      fi
+  environment:
+    name: dev
+    url: $FIANU_HOST
+  only:
+    - main
+
+deploy:qa:
+  stage: deploy
+  image: alpine:latest
+  dependencies:
+    - package:controls
+  before_script:
+    - apk add --no-cache curl bash
+    - curl -o fianu https://path-to-fianu-cli/fianu
+    - chmod +x fianu
+    - mv fianu /usr/local/bin/
+  script:
+    - |
+      if [ -z "$FIANU_QA_CLIENT_ID" ] || [ -z "$FIANU_QA_CLIENT_SECRET" ]; then
+        echo "Error: QA credentials not configured"
+        exit 1
+      fi
+
+      DEPLOYED=0
+      FAILED=0
+
+      for package in dist/*.tgz; do
+        if [ -f "$package" ]; then
+          echo "Deploying $(basename $package) to QA"
+
+          if fianu apply --path "$package"; then
+            ((DEPLOYED++))
+          else
+            ((FAILED++))
+          fi
+
+          sleep 2
+        fi
+      done
+
+      echo "QA Deployment: $DEPLOYED deployed, $FAILED failed"
+
+      if [ $FAILED -gt 0 ]; then
+        exit 1
+      fi
+  environment:
+    name: qa
+    url: https://fianu-qa.fianu.io
+  when: manual
+  only:
+    - main
+
+deploy:prod:
+  stage: deploy
+  image: alpine:latest
+  dependencies:
+    - package:controls
+  before_script:
+    - apk add --no-cache curl bash
+    - curl -o fianu https://path-to-fianu-cli/fianu
+    - chmod +x fianu
+    - mv fianu /usr/local/bin/
+  script:
+    - |
+      if [ -z "$PROD_FIANU_CLIENT_ID" ] || [ -z "$PROD_FIANU_CLIENT_SECRET" ]; then
+        echo "Error: PROD credentials not configured"
+        exit 1
+      fi
+
+      DEPLOYED=0
+      FAILED=0
+
+      for package in dist/*.tgz; do
+        if [ -f "$package" ]; then
+          echo "Deploying $(basename $package) to PRODUCTION"
+
+          if fianu apply --path "$package"; then
+            ((DEPLOYED++))
+          else
+            ((FAILED++))
+          fi
+
+          # Slower rate limit for production
+          sleep 3
+        fi
+      done
+
+      echo "PROD Deployment: $DEPLOYED deployed, $FAILED failed"
+
+      if [ $FAILED -gt 0 ]; then
+        exit 1
+      fi
+  environment:
+    name: prod
+    url: https://app.fianu.io
+  when: manual
+  only:
+    - main

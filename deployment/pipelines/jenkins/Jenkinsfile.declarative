@@ -1,0 +1,283 @@
+// Declarative Pipeline for Fianu Official Controls
+//
+// This Jenkinsfile provides a complete CI/CD pipeline using declarative syntax.
+// Stages: Validate → Test → Package → Deploy
+//
+// Setup:
+//   1. Install required plugins:
+//      - Pipeline
+//      - Git
+//      - Credentials Binding
+//      - Blue Ocean (optional, for better UI)
+//
+//   2. Configure credentials in Jenkins:
+//      - Add credentials with IDs: fianu-dev-client-id, fianu-dev-client-secret
+//
+//   3. Create pipeline job pointing to this Jenkinsfile
+
+pipeline {
+    agent any
+
+    // Environment variables
+    environment {
+        PYTHON_VERSION = '3.11'
+        FIANU_HOST = 'https://fianu-dev.fianu.io'
+
+        // Credentials
+        FIANU_CLIENT_ID = credentials('fianu-dev-client-id')
+        FIANU_CLIENT_SECRET = credentials('fianu-dev-client-secret')
+
+        // List of controls to deploy (update this)
+        CONTROLS = 'ci.commit.codereview snyk.sast.vulnerabilities'
+    }
+
+    // Build triggers
+    triggers {
+        // Poll SCM every 5 minutes
+        pollSCM('H/5 * * * *')
+
+        // Or use webhook trigger
+        // githubPush()
+    }
+
+    // Pipeline options
+    options {
+        // Keep last 10 builds
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+
+        // Timeout after 30 minutes
+        timeout(time: 30, unit: 'MINUTES')
+
+        // Don't allow concurrent builds
+        disableConcurrentBuilds()
+
+        // Timestamps in console output
+        timestamps()
+    }
+
+    stages {
+        // ====================================================================
+        // Stage 1: Checkout
+        // ====================================================================
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        // ====================================================================
+        // Stage 2: Validate
+        // ====================================================================
+        stage('Validate') {
+            steps {
+                script {
+                    echo '==================================================';
+                    echo 'Validating Controls';
+                    echo '==================================================';
+                }
+
+                // Install Python dependencies
+                sh '''
+                    pip3 install PyYAML
+                '''
+
+                // Make scripts executable
+                sh '''
+                    chmod +x examples/testing/validation/*.sh
+                '''
+
+                // Run validation
+                sh '''
+                    ./examples/testing/validation/validate-all.sh
+                '''
+            }
+        }
+
+        // ====================================================================
+        // Stage 3: Test
+        // ====================================================================
+        stage('Test') {
+            parallel {
+                stage('Test Mappers') {
+                    steps {
+                        script {
+                            echo 'Running mapper tests...';
+                        }
+
+                        sh '''
+                            pip3 install -r examples/testing/mappers/requirements.txt
+                            cd examples/testing/mappers
+                            pytest --cov=../../mappers --cov-report=term --cov-report=html
+                        '''
+
+                        // Publish HTML coverage report
+                        publishHTML([
+                            allowMissing: false,
+                            alwaysLinkToLastBuild: true,
+                            keepAll: true,
+                            reportDir: 'examples/testing/mappers/htmlcov',
+                            reportFiles: 'index.html',
+                            reportName: 'Mapper Coverage Report'
+                        ])
+                    }
+                }
+
+                stage('Test Rego Rules') {
+                    steps {
+                        script {
+                            echo 'Running Rego tests...';
+                        }
+
+                        // Install OPA
+                        sh '''
+                            if ! command -v opa &> /dev/null; then
+                                echo "Installing OPA..."
+                                curl -L -o opa https://openpolicyagent.org/downloads/latest/opa_linux_amd64
+                                chmod +x opa
+                                sudo mv opa /usr/local/bin/
+                            fi
+
+                            opa version
+                        '''
+
+                        // Run OPA tests
+                        sh '''
+                            for control_dir in */; do
+                                if [ -f "$control_dir/rule/rule.rego" ] && [ -f "$control_dir/rule/rule_test.rego" ]; then
+                                    echo "Testing $control_dir"
+                                    cd "$control_dir/rule"
+                                    opa test -v rule.rego rule_test.rego
+                                    cd ../..
+                                fi
+                            done
+                        '''
+                    }
+                }
+            }
+        }
+
+        // ====================================================================
+        // Stage 4: Package
+        // ====================================================================
+        stage('Package') {
+            steps {
+                script {
+                    echo '==================================================';
+                    echo 'Packaging Controls';
+                    echo '==================================================';
+                }
+
+                // Install Fianu CLI if needed
+                sh '''
+                    if ! command -v fianu &> /dev/null; then
+                        echo "Installing Fianu CLI..."
+                        # TODO: Add actual Fianu CLI installation
+                        # curl -o fianu https://path-to-cli/fianu
+                        # chmod +x fianu
+                        # sudo mv fianu /usr/local/bin/
+                    fi
+                '''
+
+                // Package controls
+                sh '''
+                    mkdir -p dist
+
+                    for control in $CONTROLS; do
+                        echo "Packaging $control"
+                        if [ -f "$control/contents.json" ]; then
+                            fianu package --path "$control" -o "dist/$control.tgz"
+                        else
+                            echo "Warning: $control/contents.json not found"
+                        fi
+                    done
+
+                    ls -lh dist/
+                '''
+
+                // Archive artifacts
+                archiveArtifacts artifacts: 'dist/*.tgz', fingerprint: true
+            }
+        }
+
+        // ====================================================================
+        // Stage 5: Deploy
+        // ====================================================================
+        stage('Deploy') {
+            when {
+                branch 'main'
+            }
+
+            steps {
+                script {
+                    echo '==================================================';
+                    echo 'Deploying to Development';
+                    echo '==================================================';
+                }
+
+                // Deploy controls
+                sh '''
+                    DEPLOYED=0
+                    FAILED=0
+
+                    for package in dist/*.tgz; do
+                        if [ -f "$package" ]; then
+                            echo "Deploying $(basename $package)"
+
+                            if fianu apply --path "$package"; then
+                                echo "✓ Successfully deployed"
+                                ((DEPLOYED++))
+                            else
+                                echo "✗ Failed to deploy"
+                                ((FAILED++))
+                            fi
+
+                            # Rate limiting
+                            sleep 2
+                        fi
+                    done
+
+                    echo ""
+                    echo "Deployment Summary:"
+                    echo "  Deployed: $DEPLOYED"
+                    echo "  Failed: $FAILED"
+
+                    if [ $FAILED -gt 0 ]; then
+                        exit 1
+                    fi
+                '''
+            }
+        }
+    }
+
+    // ========================================================================
+    // Post Actions
+    // ========================================================================
+    post {
+        always {
+            // Clean workspace
+            cleanWs()
+        }
+
+        success {
+            echo '✓ Pipeline completed successfully!'
+
+            // Send notification
+            // emailext subject: "Build ${env.BUILD_NUMBER} - SUCCESS",
+            //          body: "The build completed successfully.",
+            //          to: 'team@example.com'
+        }
+
+        failure {
+            echo '✗ Pipeline failed!'
+
+            // Send notification
+            // emailext subject: "Build ${env.BUILD_NUMBER} - FAILED",
+            //          body: "The build failed. Check console output.",
+            //          to: 'team@example.com'
+        }
+
+        unstable {
+            echo '⚠ Pipeline is unstable!'
+        }
+    }
+}
