@@ -1,0 +1,58 @@
+id: 00000000-1111-2222-3333-444444444444
+displayKey: BOOL
+version: '1'
+roles: []
+path: example.simple.boolean
+name: Simple Boolean Check
+fullName: Example Simple Boolean Validation
+description: The simplest possible control - checks if a boolean value is true. This is a minimal example to understand control structure.
+documentation: []
+
+measures:
+- name: required
+  type: metric
+  value: bool
+  node_id: 00000000-1111-2222-3333-555555555555
+  description: Whether this control is required to pass
+  lineItemException:
+    enabled: false
+    type: null
+    expiration:
+      required: false
+  children: []
+
+results:
+  fail: true
+  inProgress: false
+  notFound: true
+  notRequired: true
+  pass: true
+  warn: false
+
+scope: commit
+retries: false
+
+relations:
+- isPrimary: false
+  collection: 00000000-1111-2222-3333-666666666666
+  domain: 09c27275-3aaa-4530-bb62-07dc02d3b63c
+  path: example.boolean.check
+  type: plugin
+  note: occurrence
+  producer:
+    type: plugin
+    path: example-plugin
+
+isOfficial: false
+evidenceSubmissions: false
+manualAttestations: false
+
+assets:
+- type: repository
+  cardinality: all
+  targetAssetTypeUuid: 681da6ae-edbc-4587-8777-1503602abd4a
+  series:
+  - name: commit
+    code: 2112
+  - name: tag
+    code: 2113

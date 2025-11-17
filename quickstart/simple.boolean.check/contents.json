@@ -1,0 +1,33 @@
+{
+  "data": [
+    {
+      "ref": "inputs/data/policy_case_1.json"
+    }
+  ],
+  "detail": {
+    "ref": "detail.py",
+    "tests": [],
+    "workingDirectory": "mappers"
+  },
+  "display": {
+    "ref": "display.py",
+    "tests": [],
+    "workingDirectory": "mappers"
+  },
+  "rule": {
+    "engine": "opa",
+    "ref": "rule.rego",
+    "tests": [],
+    "workingDirectory": "rule"
+  },
+  "spec": {
+    "inputs": [
+      {
+        "ref": "testing/payloads/occ_case_1.json"
+      }
+    ],
+    "ref": "spec.yaml"
+  },
+  "type": "control",
+  "version": "2.0.0"
+}
